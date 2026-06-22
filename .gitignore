@@ -32,5 +32,5 @@ build/
 ### VS Code ###
 .vscode/
 
-# Ignore local application properties containing secrets
-src/main/resources/application.properties
+# Ignore local environment credentials
+.env
