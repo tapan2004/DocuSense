@@ -8,32 +8,31 @@ import lombok.NoArgsConstructor;
 import java.time.LocalDateTime;
 
 @Entity
-@Table(name = "document_chunks")
+@Table(name = "semantic_cache")
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-public class DocumentChunk {
+public class SemanticCache {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "document_id", nullable = false)
-    private Document document;
+    @Column(columnDefinition = "TEXT", nullable = false)
+    private String query;
 
-    @Column(name = "chunk_index", nullable = false)
-    private Integer chunkIndex;
+    @Column(name = "query_vector", columnDefinition = "vector(768)", nullable = false)
+    private String queryVector; // Vector format stored in pgvector
 
     @Column(columnDefinition = "TEXT", nullable = false)
-    private String content; // Child chunk text
+    private String answer;
 
-    @Column(name = "parent_content", columnDefinition = "TEXT", nullable = false)
-    private String parentContent; // Wider parent segment context (1200 tokens)
+    @Column(name = "department_scope", nullable = false)
+    private String departmentScope;
 
-    @Column(name = "embedding_id", nullable = false)
-    private String embeddingId;
+    @Column(name = "role_scope", nullable = false)
+    private String roleScope;
 
     @Column(name = "created_at", nullable = false)
     private LocalDateTime createdAt;

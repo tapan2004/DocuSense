@@ -14,6 +14,9 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 import java.io.IOException;
 import java.util.List;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
@@ -23,11 +26,10 @@ public class DocumentIngestionService {
     private final DocumentChunkRepository documentChunkRepository;
     private final VectorStore vectorStore;
 
-    // Parses the file, chunks it, appends metadata security tags, and saves it.
     @Transactional
     public Document ingest(MultipartFile file, String title, String departmentOwner, String requiredRole, String username) throws IOException {
 
-        // 1. Save Metastore details in standard relational database
+        // 1. Save Metastore details in relational database
         String mockFilePath = "uploads/" + System.currentTimeMillis() + "_" + file.getOriginalFilename();
 
         Document document = Document.builder()
@@ -40,62 +42,85 @@ public class DocumentIngestionService {
 
         final Document savedDocument = documentRepository.save(document);
 
-        // 2. Parse file content using Apache Tika (Spring AI wrapper)
+        // 2. Parse file content using Apache Tika
         TikaDocumentReader tikaReader = new TikaDocumentReader(new InputStreamResource(file.getInputStream()));
         List<org.springframework.ai.document.Document> parsedDocuments = tikaReader.get();
 
-        // 3. Chunk the document using the splitter builder to avoid deprecation warnings
-        TokenTextSplitter splitter = TokenTextSplitter.builder()
-                .withChunkSize(800)
+        // 3. Split into Parent Chunks (1200 tokens, 200 overlap)
+        TokenTextSplitter parentSplitter = TokenTextSplitter.builder()
+                .withChunkSize(1200)
+                .withChunkOverlap(200)
                 .build();
-        List<org.springframework.ai.document.Document> chunks = splitter.apply(parsedDocuments);
+        List<org.springframework.ai.document.Document> parentChunks = parentSplitter.apply(parsedDocuments);
 
-        // 4. Populate security tags into each chunk's metadata context (Pre-Retrieval Hook)
-        for (org.springframework.ai.document.Document chunk : chunks) {
-            chunk.getMetadata().put("document_id", savedDocument.getId());
-            chunk.getMetadata().put("department_owner", departmentOwner);
-            chunk.getMetadata().put("required_role", requiredRole);
+        // 4. Subdivide into Child Chunks (300 tokens, 50 overlap)
+        TokenTextSplitter childSplitter = TokenTextSplitter.builder()
+                .withChunkSize(300)
+                .withChunkOverlap(50)
+                .build();
+
+        List<org.springframework.ai.document.Document> vectorStoreChunks = new ArrayList<>();
+        List<DocumentChunk> dbChunksToSave = new ArrayList<>();
+
+        int childIndex = 0;
+        for (org.springframework.ai.document.Document parent : parentChunks) {
+            String parentText = parent.getText();
+            List<org.springframework.ai.document.Document> children = childSplitter.apply(List.of(parent));
+
+            for (org.springframework.ai.document.Document child : children) {
+                // Generate a custom ID for the child chunk vector
+                String childId = UUID.randomUUID().toString();
+
+                org.springframework.ai.document.Document vectorChunk = new org.springframework.ai.document.Document(
+                        childId,
+                        child.getText(),
+                        new HashMap<>(child.getMetadata())
+                );
+
+                // Populate security tags
+                vectorChunk.getMetadata().put("document_id", savedDocument.getId());
+                vectorChunk.getMetadata().put("department_owner", departmentOwner);
+                vectorChunk.getMetadata().put("required_role", requiredRole);
+
+                vectorStoreChunks.add(vectorChunk);
+
+                // Create database relational mapping linking child to parent text
+                DocumentChunk dbChunk = DocumentChunk.builder()
+                        .document(savedDocument)
+                        .chunkIndex(childIndex++)
+                        .content(child.getText())
+                        .parentContent(parentText) // Store the larger context
+                        .embeddingId(childId)
+                        .build();
+                dbChunksToSave.add(dbChunk);
+            }
         }
 
-        // 5. Generate embeddings and save to PostgreSQL + pgvector
-        vectorStore.add(chunks);
+        // 5. Ingest child vectors in pgvector
+        vectorStore.add(vectorStoreChunks);
 
-        // 6. Save relational chunk mapping for querying/cascading
-        for (int i = 0; i < chunks.size(); i++) {
-            org.springframework.ai.document.Document chunk = chunks.get(i);
-            DocumentChunk documentChunk = DocumentChunk.builder()
-                    .document(savedDocument)
-                    .chunkIndex(i)
-                    .content(chunk.getText())
-                    .embeddingId(chunk.getId())
-                    .build();
-            documentChunkRepository.save(documentChunk);
+        // 6. Persist text blocks and mapping IDs in SQL
+        for (DocumentChunk dbChunk : dbChunksToSave) {
+            documentChunkRepository.save(dbChunk);
         }
+
         return savedDocument;
     }
 
-    /**
-     * Deletes a document, its associated relational chunks, and its vector embeddings.
-     */
     @Transactional
     public void deleteDocument(Long documentId) {
         Document document = documentRepository.findById(documentId)
                 .orElseThrow(() -> new IllegalArgumentException("Document not found with ID: " + documentId));
 
-        // 1. Retrieve associated relational chunks
         List<DocumentChunk> chunks = documentChunkRepository.findByDocumentId(documentId);
-
-        // 2. Extract vector store embedding IDs
         List<String> vectorIds = chunks.stream()
                 .map(DocumentChunk::getEmbeddingId)
                 .toList();
 
-        // 3. Purge vector embeddings from pgvector store
         if (!vectorIds.isEmpty()) {
             vectorStore.delete(vectorIds);
         }
 
-        // 4. Delete the document metadata record (triggers Cascade delete on relational document_chunks table)
         documentRepository.delete(document);
     }
 }
