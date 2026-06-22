@@ -25,6 +25,7 @@ public class DocumentIngestionService {
     private final DocumentRepository documentRepository;
     private final DocumentChunkRepository documentChunkRepository;
     private final VectorStore vectorStore;
+    private final PiiRedactorService piiRedactorService;
 
     @Transactional
     public Document ingest(MultipartFile file, String title, String departmentOwner, String requiredRole, String username) throws IOException {
@@ -46,11 +47,20 @@ public class DocumentIngestionService {
         TikaDocumentReader tikaReader = new TikaDocumentReader(new InputStreamResource(file.getInputStream()));
         List<org.springframework.ai.document.Document> parsedDocuments = tikaReader.get();
 
+        // Redact PII in parsed text before chunking
+        List<org.springframework.ai.document.Document> redactedDocuments = parsedDocuments.stream()
+                .map(doc -> new org.springframework.ai.document.Document(
+                        doc.getId(),
+                        piiRedactorService.redact(doc.getText()),
+                        doc.getMetadata()
+                ))
+                .toList();
+
         // 3. Split into Parent Chunks (1200 tokens, 200 overlap)
         TokenTextSplitter parentSplitter = TokenTextSplitter.builder()
                 .withChunkSize(1200)
                 .build();
-        List<org.springframework.ai.document.Document> parentChunks = parentSplitter.apply(parsedDocuments);
+        List<org.springframework.ai.document.Document> parentChunks = parentSplitter.apply(redactedDocuments);
 
         // 4. Subdivide into Child Chunks (300 tokens, 50 overlap)
         TokenTextSplitter childSplitter = TokenTextSplitter.builder()

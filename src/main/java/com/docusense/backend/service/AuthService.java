@@ -33,16 +33,18 @@ public class AuthService {
     }
 
     public AuthResponse login(AuthRequest authRequest) {
+        // 1. Check if the user is registered first
+        User user = userRepository.findByUsername(authRequest.getUsername())
+                .orElseThrow(() -> new IllegalArgumentException("User does not exist. Please register first."));
+
+        // 2. Validate credentials
         try {
             authenticationManager.authenticate(new UsernamePasswordAuthenticationToken(
                     authRequest.getUsername(),
                     authRequest.getPassword()));
-
         } catch (BadCredentialsException e) {
-            throw new BadCredentialsException("Incorrect username or password");
+            throw new BadCredentialsException("Incorrect password. Please try again.");
         }
-        User user = userRepository.findByUsername(authRequest.getUsername())
-                .orElseThrow(() -> new IllegalArgumentException("User not found"));
 
         String generateToken = jwtTokenUtil.generateToken(
                 user.getUsername(),
