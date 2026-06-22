@@ -71,7 +71,6 @@ public class DocumentIngestionService {
                     .build();
             documentChunkRepository.save(documentChunk);
         }
-
         return savedDocument;
     }
 

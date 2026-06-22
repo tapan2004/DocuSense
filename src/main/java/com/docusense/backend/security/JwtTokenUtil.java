@@ -3,6 +3,7 @@ package com.docusense.backend.security;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.security.Key;
@@ -13,11 +14,14 @@ import java.util.function.Function;
 
 @Component
 public class JwtTokenUtil {
-    private final String SECRET_KEY = "mySuperSecretKeyForJwtAuthentication123456";
+
+    @Value("${app.jwt.secret:myDefaultSuperSecretKeyForJwtAuthentication123456}")
+    private String secretKey;
+
     private final long JWT_TOKEN_VALIDITY = 5 * 60 * 60 * 1000; // 5 hours
 
     private Key getSigningKey() {
-        return Keys.hmacShaKeyFor(SECRET_KEY.getBytes());
+        return Keys.hmacShaKeyFor(secretKey.getBytes());
     }
 
     public String getUsernameFromToken(String token) {
@@ -39,7 +43,7 @@ public class JwtTokenUtil {
 
     private Claims getAllClaimsFromToken(String token) {
         return Jwts.parser()
-                .verifyWith(Keys.hmacShaKeyFor(SECRET_KEY.getBytes()))
+                .verifyWith(Keys.hmacShaKeyFor(secretKey.getBytes()))
                 .build()
                 .parseSignedClaims(token)
                 .getPayload();
