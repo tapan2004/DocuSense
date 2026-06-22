@@ -2,13 +2,17 @@ package com.docusense.backend.controller;
 
 import com.docusense.backend.dto.UploadResponse;
 import com.docusense.backend.model.Document;
+import com.docusense.backend.repository.DocumentRepository;
 import com.docusense.backend.service.DocumentIngestionService;
+import com.docusense.backend.service.SecurityFilterService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import java.util.List;
 import java.util.Objects;
+import java.util.ArrayList;
 
 @RestController
 @RequestMapping("/api/documents")
@@ -16,6 +20,8 @@ import java.util.Objects;
 public class DocumentController {
 
     private final DocumentIngestionService documentIngestionService;
+    private final DocumentRepository documentRepository;
+    private final SecurityFilterService securityFilterService;
 
     @PostMapping("/upload")
     public ResponseEntity<UploadResponse> uploadDocument(
@@ -44,6 +50,33 @@ public class DocumentController {
             return ResponseEntity.badRequest().body(e.getMessage());
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body("Failed to delete document: " + e.getMessage());
+        }
+    }
+
+    @GetMapping
+    public ResponseEntity<List<Document>> listDocuments() {
+        try {
+            String userDepartment = securityFilterService.getUserDepartment();
+            String userRole = securityFilterService.getUserRole();
+            
+            List<Document> allDocs = documentRepository.findAll();
+            List<String> allowedRoles = new ArrayList<>();
+            allowedRoles.add("ROLE_USER");
+            if ("ROLE_MANAGER".equals(userRole)) {
+                allowedRoles.add("ROLE_MANAGER");
+            } else if ("ROLE_ADMIN".equals(userRole)) {
+                allowedRoles.add("ROLE_MANAGER");
+                allowedRoles.add("ROLE_ADMIN");
+            }
+            
+            List<Document> filteredDocs = allDocs.stream()
+                .filter(doc -> ("General".equalsIgnoreCase(doc.getDepartmentOwner()) || userDepartment.equalsIgnoreCase(doc.getDepartmentOwner()))
+                            && allowedRoles.contains(doc.getRequiredRole()))
+                .toList();
+                
+            return ResponseEntity.ok(filteredDocs);
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().build();
         }
     }
 }
