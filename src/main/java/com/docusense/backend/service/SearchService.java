@@ -41,21 +41,24 @@ public class SearchService {
                 .map(Document::getText)
                 .collect(Collectors.joining("\n\n---\n\n"));
 
-        // 4. Query the LLM using ChatClient's modern fluent API
+        // 4. Query the LLM using a single, unified user prompt to avoid Gemini system role serialization issues
+        String combinedPrompt = String.format("""
+                You are a secure corporate AI assistant. You answer questions using only the provided document snippets under CONTEXT.
+                
+                Rules:
+                1. Answer the query relying exclusively on the facts stated in the CONTEXT.
+                2. Do not use external knowledge or invent facts.
+                3. If the answer cannot be found in the CONTEXT, reply exactly: "I do not have access to that information or it is not available in my authorized documents."
+                
+                CONTEXT:
+                %s
+                
+                QUESTION:
+                %s
+                """, context, query);
+
         return chatClient.prompt()
-                .system(sp -> sp.text("""
-                                You are a secure corporate AI assistant. You answer questions using only the provided document snippets under CONTEXT.
-                                
-                                Rules:
-                                1. Answer the query relying exclusively on the facts stated in the CONTEXT.
-                                2. Do not use external knowledge or invent facts.
-                                3. If the answer cannot be found in the CONTEXT, reply exactly: "I do not have access to that information or it is not available in my authorized documents."
-                                
-                                CONTEXT:
-                                {context}
-                                """)
-                        .param("context", context))
-                .user(query)
+                .user(combinedPrompt)
                 .call()
                 .content();
     }

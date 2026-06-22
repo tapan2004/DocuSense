@@ -22,6 +22,7 @@ public class SearchController {
             String answer = searchService.secureSearch(request.getQuery());
             return ResponseEntity.ok(answer);
         } catch (Exception e) {
+            e.printStackTrace();
             return ResponseEntity.internalServerError().body("An error occurred during search processing: " + e.getMessage());
         }
     }
