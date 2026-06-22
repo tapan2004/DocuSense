@@ -92,7 +92,6 @@ public class SearchService {
                 System.err.println("Redis cache write failed: " + e.getMessage());
             }
         }
-
         return answer;
     }
 

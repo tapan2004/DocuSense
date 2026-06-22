@@ -23,9 +23,7 @@ public class DocumentIngestionService {
     private final DocumentChunkRepository documentChunkRepository;
     private final VectorStore vectorStore;
 
-    /**
-     * Parses the file, chunks it, appends metadata security tags, and saves it.
-     */
+    // Parses the file, chunks it, appends metadata security tags, and saves it.
     @Transactional
     public Document ingest(MultipartFile file, String title, String departmentOwner, String requiredRole, String username) throws IOException {
 
