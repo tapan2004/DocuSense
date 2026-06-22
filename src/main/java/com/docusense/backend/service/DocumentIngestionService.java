@@ -49,14 +49,12 @@ public class DocumentIngestionService {
         // 3. Split into Parent Chunks (1200 tokens, 200 overlap)
         TokenTextSplitter parentSplitter = TokenTextSplitter.builder()
                 .withChunkSize(1200)
-                .withChunkOverlap(200)
                 .build();
         List<org.springframework.ai.document.Document> parentChunks = parentSplitter.apply(parsedDocuments);
 
         // 4. Subdivide into Child Chunks (300 tokens, 50 overlap)
         TokenTextSplitter childSplitter = TokenTextSplitter.builder()
                 .withChunkSize(300)
-                .withChunkOverlap(50)
                 .build();
 
         List<org.springframework.ai.document.Document> vectorStoreChunks = new ArrayList<>();
