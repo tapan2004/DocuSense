@@ -11,7 +11,9 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.core.io.InputStreamResource;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.multipart.MultipartFile;
 import java.io.IOException;
 import java.util.List;
@@ -28,11 +30,11 @@ public class DocumentIngestionService {
     private final VectorStore vectorStore;
     private final PiiRedactorService piiRedactorService;
     private final ChatClient chatClient;
+    private final PlatformTransactionManager transactionManager;
 
-    @Transactional
     public Document ingest(MultipartFile file, String title, String departmentOwner, String requiredRole, String username) throws IOException {
 
-        // 1. Save Metastore details in relational database
+        // 1. Prepare Metastore details
         String mockFilePath = "uploads/" + System.currentTimeMillis() + "_" + file.getOriginalFilename();
 
         Document document = Document.builder()
@@ -43,13 +45,15 @@ public class DocumentIngestionService {
                 .requiredRole(requiredRole)
                 .build();
 
-        final Document savedDocument = documentRepository.save(document);
+        // Save metadata document in a short transactional block
+        TransactionTemplate transactionTemplate = new TransactionTemplate(transactionManager);
+        final Document savedDocument = transactionTemplate.execute(status -> documentRepository.save(document));
 
-        // 2. Parse file content using Apache Tika
+        // 2. Parse file content using Apache Tika (outside transaction)
         TikaDocumentReader tikaReader = new TikaDocumentReader(new InputStreamResource(file.getInputStream()));
         List<org.springframework.ai.document.Document> parsedDocuments = tikaReader.get();
 
-        // Redact PII in parsed text before chunking
+        // Redact PII in parsed text before chunking (outside transaction)
         List<org.springframework.ai.document.Document> redactedDocuments = parsedDocuments.stream()
                 .map(doc -> new org.springframework.ai.document.Document(
                         doc.getId(),
@@ -58,13 +62,13 @@ public class DocumentIngestionService {
                 ))
                 .toList();
 
-        // 3. Split into Parent Chunks (1200 tokens, 200 overlap)
+        // 3. Split into Parent Chunks (1200 tokens)
         TokenTextSplitter parentSplitter = TokenTextSplitter.builder()
                 .withChunkSize(1200)
                 .build();
         List<org.springframework.ai.document.Document> parentChunks = parentSplitter.apply(redactedDocuments);
 
-        // 4. Subdivide into Child Chunks (300 tokens, 50 overlap)
+        // 4. Subdivide into Child Chunks (300 tokens)
         TokenTextSplitter childSplitter = TokenTextSplitter.builder()
                 .withChunkSize(300)
                 .build();
@@ -81,7 +85,7 @@ public class DocumentIngestionService {
                 // Generate a custom ID for the child chunk vector
                 String childId = UUID.randomUUID().toString();
 
-                // Contextual Retrieval: Prepend contextual prefix to situates child within parent
+                // Contextual Retrieval: Prepend contextual prefix to situates child within parent (outside transaction)
                 String contextualizedContent = child.getText();
                 try {
                     String contextualPrompt = String.format("""
@@ -132,13 +136,13 @@ public class DocumentIngestionService {
             }
         }
 
-        // 5. Ingest child vectors in pgvector
+        // 5. Ingest child vectors in pgvector (outside transaction)
         vectorStore.add(vectorStoreChunks);
 
-        // 6. Persist text blocks and mapping IDs in SQL
-        for (DocumentChunk dbChunk : dbChunksToSave) {
-            documentChunkRepository.save(dbChunk);
-        }
+        // 6. Persist text blocks and mapping IDs in SQL using a batch write inside a short transactional block
+        transactionTemplate.executeWithoutResult(status -> {
+            documentChunkRepository.saveAll(dbChunksToSave);
+        });
 
         return savedDocument;
     }

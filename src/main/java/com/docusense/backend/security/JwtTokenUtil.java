@@ -15,7 +15,7 @@ import java.util.function.Function;
 @Component
 public class JwtTokenUtil {
 
-    @Value("${app.jwt.secret:myDefaultSuperSecretKeyForJwtAuthentication123456}")
+    @Value("${app.jwt.secret}")
     private String secretKey;
 
     private final long JWT_TOKEN_VALIDITY = 5 * 60 * 60 * 1000; // 5 hours

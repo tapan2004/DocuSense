@@ -59,7 +59,6 @@ public class DocumentController {
             String userDepartment = securityFilterService.getUserDepartment();
             String userRole = securityFilterService.getUserRole();
             
-            List<Document> allDocs = documentRepository.findAll();
             List<String> allowedRoles = new ArrayList<>();
             allowedRoles.add("ROLE_USER");
             if ("ROLE_MANAGER".equals(userRole)) {
@@ -69,11 +68,7 @@ public class DocumentController {
                 allowedRoles.add("ROLE_ADMIN");
             }
             
-            List<Document> filteredDocs = allDocs.stream()
-                .filter(doc -> ("General".equalsIgnoreCase(doc.getDepartmentOwner()) || userDepartment.equalsIgnoreCase(doc.getDepartmentOwner()))
-                            && allowedRoles.contains(doc.getRequiredRole()))
-                .toList();
-                
+            List<Document> filteredDocs = documentRepository.findAuthorizedDocuments(userDepartment, allowedRoles);
             return ResponseEntity.ok(filteredDocs);
         } catch (Exception e) {
             return ResponseEntity.internalServerError().build();
