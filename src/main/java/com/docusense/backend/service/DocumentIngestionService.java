@@ -20,6 +20,12 @@ import java.util.List;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.UUID;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import org.springframework.retry.support.RetryTemplate;
 
 @Service
 @RequiredArgsConstructor
@@ -73,8 +79,18 @@ public class DocumentIngestionService {
                 .withChunkSize(300)
                 .build();
 
-        List<org.springframework.ai.document.Document> vectorStoreChunks = new ArrayList<>();
-        List<DocumentChunk> dbChunksToSave = new ArrayList<>();
+        // Retry template with exponential backoff for API robustness
+        RetryTemplate retryTemplate = RetryTemplate.builder()
+                .maxAttempts(3)
+                .exponentialBackoff(1000, 2.0, 10000)
+                .retryOn(Exception.class)
+                .build();
+
+        List<org.springframework.ai.document.Document> vectorStoreChunks = Collections.synchronizedList(new ArrayList<>());
+        List<DocumentChunk> dbChunksToSave = Collections.synchronizedList(new ArrayList<>());
+
+        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+        List<Future<Void>> futures = new ArrayList<>();
 
         int childIndex = 0;
         for (org.springframework.ai.document.Document parent : parentChunks) {
@@ -82,59 +98,73 @@ public class DocumentIngestionService {
             List<org.springframework.ai.document.Document> children = childSplitter.apply(List.of(parent));
 
             for (org.springframework.ai.document.Document child : children) {
-                // Generate a custom ID for the child chunk vector
-                String childId = UUID.randomUUID().toString();
-
-                // Contextual Retrieval: Prepend contextual prefix to situates child within parent (outside transaction)
-                String contextualizedContent = child.getText();
-                try {
-                    String contextualPrompt = String.format("""
-                            Given this section of a document and a specific subsection chunk, write a 1-sentence contextual prefix that situates the subsection within the wider section. Keep it under 25 words. Do not write introductory text.
-                            
-                            SECTION:
-                            %s
-                            
-                            SUBSECTION:
-                            %s
-                            """, parentText, child.getText());
-                    
-                    String contextPrefix = chatClient.prompt()
-                            .user(contextualPrompt)
-                            .call()
-                            .content();
-                    
-                    if (contextPrefix != null && !contextPrefix.isBlank()) {
-                        contextualizedContent = contextPrefix.trim() + "\n" + child.getText();
-                        System.out.println(">>> Contextualized Chunk successfully generated prefix: " + contextPrefix.trim());
+                final int index = childIndex++;
+                futures.add(executor.submit(() -> {
+                    String childId = UUID.randomUUID().toString();
+                    String contextualizedContent = child.getText();
+                    try {
+                        String contextualPrompt = String.format("""
+                                Given this section of a document and a specific subsection chunk, write a 1-sentence contextual prefix that situates the subsection within the wider section. Keep it under 25 words. Do not write introductory text.
+                                
+                                SECTION:
+                                %s
+                                
+                                SUBSECTION:
+                                %s
+                                """, parentText, child.getText());
+                        
+                        String contextPrefix = retryTemplate.execute(context -> 
+                            chatClient.prompt()
+                                    .user(contextualPrompt)
+                                    .call()
+                                    .content()
+                        );
+                        
+                        if (contextPrefix != null && !contextPrefix.isBlank()) {
+                            contextualizedContent = contextPrefix.trim() + "\n" + child.getText();
+                            System.out.println(">>> [V-Thread] Contextualized Chunk successfully generated prefix: " + contextPrefix.trim());
+                        }
+                    } catch (Exception e) {
+                        System.err.println("Contextualization generation failed: " + e.getMessage());
                     }
-                } catch (Exception e) {
-                    System.err.println("Contextualization generation failed, using raw content: " + e.getMessage());
-                }
 
-                org.springframework.ai.document.Document vectorChunk = new org.springframework.ai.document.Document(
-                        childId,
-                        contextualizedContent,
-                        new HashMap<>(child.getMetadata())
-                );
+                    org.springframework.ai.document.Document vectorChunk = new org.springframework.ai.document.Document(
+                            childId,
+                            contextualizedContent,
+                            new HashMap<>(child.getMetadata())
+                    );
 
-                // Populate security tags
-                vectorChunk.getMetadata().put("document_id", savedDocument.getId());
-                vectorChunk.getMetadata().put("department_owner", departmentOwner);
-                vectorChunk.getMetadata().put("required_role", requiredRole);
+                    vectorChunk.getMetadata().put("document_id", savedDocument.getId());
+                    vectorChunk.getMetadata().put("department_owner", departmentOwner);
+                    vectorChunk.getMetadata().put("required_role", requiredRole);
 
-                vectorStoreChunks.add(vectorChunk);
+                    vectorStoreChunks.add(vectorChunk);
 
-                // Create database relational mapping linking child to parent text
-                DocumentChunk dbChunk = DocumentChunk.builder()
-                        .document(savedDocument)
-                        .chunkIndex(childIndex++)
-                        .content(contextualizedContent)
-                        .parentContent(parentText) // Store the larger context
-                        .embeddingId(childId)
-                        .build();
-                dbChunksToSave.add(dbChunk);
+                    DocumentChunk dbChunk = DocumentChunk.builder()
+                            .document(savedDocument)
+                            .chunkIndex(index)
+                            .content(contextualizedContent)
+                            .parentContent(parentText)
+                            .embeddingId(childId)
+                            .build();
+                    dbChunksToSave.add(dbChunk);
+                    return null;
+                }));
             }
         }
+
+        // Wait for concurrency completion
+        for (Future<Void> future : futures) {
+            try {
+                future.get();
+            } catch (Exception e) {
+                System.err.println("Worker thread error: " + e.getMessage());
+            }
+        }
+        executor.shutdown();
+
+        // Sort mappings by index to maintain original structural layout
+        dbChunksToSave.sort(Comparator.comparing(DocumentChunk::getChunkIndex));
 
         // 5. Ingest child vectors in pgvector (outside transaction)
         vectorStore.add(vectorStoreChunks);

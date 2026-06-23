@@ -13,4 +13,5 @@ import java.util.List;
 public class SearchResponse {
     private String answer;
     private List<SourceDto> sources;
+    private Boolean grounded;
 }
