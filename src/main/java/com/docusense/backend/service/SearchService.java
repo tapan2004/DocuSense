@@ -45,6 +45,7 @@ public class SearchService {
     private final PiiRedactorService piiRedactorService;
     private final ContextPruningService contextPruningService;
     private final EmbeddingModel embeddingModel;
+    private final RedisTemplate<String, Object> redisTemplate;
 
     public SearchResponse secureSearch(String query) {
         // Wrapper delegating to conversational secureChat with an empty history
@@ -73,6 +74,36 @@ public class SearchService {
                         .content(piiRedactorService.redact(msg.getContent()))
                         .build());
             }
+        }
+
+        // Build unique cache key from conversation history hash + current query hash
+        StringBuilder historyHashInput = new StringBuilder();
+        if (request.getHistory() != null) {
+            for (ChatMessageDto msg : request.getHistory()) {
+                historyHashInput.append(msg.getRole()).append(":").append(msg.getContent()).append("|");
+            }
+        }
+        historyHashInput.append(redactedQuery.trim().toLowerCase());
+        String cacheLookupString = historyHashInput.toString();
+        String queryHash = DigestUtils.md5DigestAsHex(cacheLookupString.getBytes());
+        String redisKey = "docusense:cache:" + userDepartment + ":" + userRole + ":" + queryHash;
+
+        // Redis Exact Match Caching Lookup
+        try {
+            Object cachedAnswerObj = redisTemplate.opsForValue().get(redisKey);
+            if (cachedAnswerObj != null) {
+                String cachedAnswer = (String) cachedAnswerObj;
+                System.out.println(">>> Redis Exact Match Cache HIT for query: " + redactedQuery);
+                long latency = System.currentTimeMillis() - startTime;
+                logQuery(username, redactedQuery, 0, 0, 0.0, latency, "HIT");
+                return SearchResponse.builder()
+                        .answer(cachedAnswer)
+                        .grounded(true)
+                        .sources(new ArrayList<>())
+                        .build();
+            }
+        } catch (Exception e) {
+            System.err.println("Redis cache lookup failed: " + e.getMessage());
         }
 
         // 2. History-Aware Query Rewriting
@@ -318,6 +349,8 @@ public class SearchService {
         // Save log details to DB
         logQuery(username, redactedQuery, inputTokens, outputTokens, cost, latency, "MISS");
 
+        boolean grounded = true;
+
         // 12. Groundedness Evaluation Guardrail
         if (generatedAnswer != null && !generatedAnswer.contains("I do not have access")) {
             String validationPrompt = String.format("""
@@ -343,16 +376,17 @@ public class SearchService {
 
                 if (evaluation != null && evaluation.trim().equalsIgnoreCase("UNGROUNDED")) {
                     System.out.println(">>> Guardrail Triggered: Generated answer was evaluated as UNGROUNDED.");
-                    generatedAnswer += "\n\n*(Note: This response contains details flagged by the guardrails as potentially ungrounded based on current document context.)*";
+                    grounded = false;
                 }
             } catch (Exception e) {
                 System.err.println("Groundedness evaluation failed: " + e.getMessage());
             }
         }
 
-        // 13. Write Response to Semantic Cache Table
+        // 13. Write Response to Caches (PostgreSQL & Redis)
         if (generatedAnswer != null) {
             try {
+                // A. Save to SQL Semantic Cache
                 SemanticCache newCache = SemanticCache.builder()
                         .query(redactedQuery)
                         .queryVector(sqlVectorString)
@@ -361,14 +395,19 @@ public class SearchService {
                         .roleScope(userRole)
                         .build();
                 semanticCacheRepository.save(newCache);
+
+                // B. Save to Redis Exact-Match Cache (with 10 minutes TTL)
+                redisTemplate.opsForValue().set(redisKey, generatedAnswer, 10, TimeUnit.MINUTES);
+                System.out.println(">>> Redis Exact Match Cache set for query: " + redactedQuery);
             } catch (Exception e) {
-                System.err.println("Failed to write to semantic cache: " + e.getMessage());
+                System.err.println("Cache write failed: " + e.getMessage());
             }
         }
 
         return SearchResponse.builder()
                 .answer(generatedAnswer)
                 .sources(reRankedSources)
+                .grounded(grounded)
                 .build();
     }
 
