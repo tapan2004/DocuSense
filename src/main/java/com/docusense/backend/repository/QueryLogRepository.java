@@ -1,6 +1,8 @@
 package com.docusense.backend.repository;
 
 import com.docusense.backend.model.QueryLog;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.stereotype.Repository;
@@ -9,6 +11,10 @@ import java.util.List;
 @Repository
 public interface QueryLogRepository extends JpaRepository<QueryLog, Long> {
     List<QueryLog> findTop50ByOrderByCreatedAtDesc();
+
+    Page<QueryLog> findAllByOrderByCreatedAtDesc(Pageable pageable);
+
+    Page<QueryLog> findByUsernameContainingIgnoreCaseOrderByCreatedAtDesc(String username, Pageable pageable);
 
     @Query(value = "SELECT COUNT(*) FROM query_logs", nativeQuery = true)
     long countAllQueries();
