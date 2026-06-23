@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { api } from '../utils/api';
 
 export default function ObservabilityDashboard() {
   const [stats, setStats] = useState({
@@ -18,23 +19,12 @@ export default function ObservabilityDashboard() {
     const fetchData = async () => {
       setLoading(true);
       setError('');
-      const token = sessionStorage.getItem('docusense_token');
 
       try {
-        const [statsRes, logsRes, feedbacksRes] = await Promise.all([
-          fetch('http://localhost:8080/api/observability/stats', { headers: { 'Authorization': `Bearer ${token}` } }),
-          fetch('http://localhost:8080/api/observability/logs', { headers: { 'Authorization': `Bearer ${token}` } }),
-          fetch('http://localhost:8080/api/observability/feedbacks', { headers: { 'Authorization': `Bearer ${token}` } })
-        ]);
-
-        if (!statsRes.ok || !logsRes.ok || !feedbacksRes.ok) {
-          throw new Error('Failed to retrieve dashboard telemetry. Verification of permissions required.');
-        }
-
         const [statsData, logsData, feedbacksData] = await Promise.all([
-          statsRes.json(),
-          logsRes.json(),
-          feedbacksRes.json()
+          api.getObservabilityStats(),
+          api.getObservabilityLogs(),
+          api.getObservabilityFeedbacks()
         ]);
 
         setStats(statsData);

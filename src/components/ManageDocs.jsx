@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { api } from '../utils/api';
 
 export default function ManageDocs() {
   const [docs, setDocs] = useState([]);
@@ -7,13 +8,8 @@ export default function ManageDocs() {
 
   const fetchDocs = async () => {
     setLoading(true);
-    const token = sessionStorage.getItem('docusense_token');
     try {
-      const response = await fetch('http://localhost:8080/api/documents', {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (!response.ok) throw new Error('Failed to retrieve catalog');
-      const data = await response.json();
+      const data = await api.listDocuments();
       setDocs(data);
     } catch (err) {
       setError(err.message);
@@ -25,14 +21,8 @@ export default function ManageDocs() {
   const handleDelete = async (id) => {
     if (!confirm('Are you sure you want to delete this document? This will purge its text chunks and vector embeddings.')) return;
 
-    const token = sessionStorage.getItem('docusense_token');
     try {
-      const response = await fetch(`http://localhost:8080/api/documents/${id}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (!response.ok) throw new Error('Deletion request rejected.');
-      
+      await api.deleteDocument(id);
       setDocs(docs.filter(doc => doc.id !== id));
     } catch (err) {
       alert(err.message);

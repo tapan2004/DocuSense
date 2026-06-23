@@ -38,6 +38,12 @@ export default function UploadDoc() {
     setError('');
     setSuccess('');
 
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('title', title);
+    formData.append('departmentOwner', departmentOwner);
+    formData.append('requiredRole', requiredRole);
+
     try {
       const data = await api.uploadDocument(formData);
       setSuccess(`Document "${data.title}" successfully ingested and vectorized!`);
