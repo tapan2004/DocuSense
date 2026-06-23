@@ -7,6 +7,7 @@ import com.docusense.backend.repository.DocumentChunkRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.reader.tika.TikaDocumentReader;
 import org.springframework.ai.transformer.splitter.TokenTextSplitter;
+import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.core.io.InputStreamResource;
 import org.springframework.stereotype.Service;
@@ -26,6 +27,7 @@ public class DocumentIngestionService {
     private final DocumentChunkRepository documentChunkRepository;
     private final VectorStore vectorStore;
     private final PiiRedactorService piiRedactorService;
+    private final ChatClient chatClient;
 
     @Transactional
     public Document ingest(MultipartFile file, String title, String departmentOwner, String requiredRole, String username) throws IOException {
@@ -79,9 +81,35 @@ public class DocumentIngestionService {
                 // Generate a custom ID for the child chunk vector
                 String childId = UUID.randomUUID().toString();
 
+                // Contextual Retrieval: Prepend contextual prefix to situates child within parent
+                String contextualizedContent = child.getText();
+                try {
+                    String contextualPrompt = String.format("""
+                            Given this section of a document and a specific subsection chunk, write a 1-sentence contextual prefix that situates the subsection within the wider section. Keep it under 25 words. Do not write introductory text.
+                            
+                            SECTION:
+                            %s
+                            
+                            SUBSECTION:
+                            %s
+                            """, parentText, child.getText());
+                    
+                    String contextPrefix = chatClient.prompt()
+                            .user(contextualPrompt)
+                            .call()
+                            .content();
+                    
+                    if (contextPrefix != null && !contextPrefix.isBlank()) {
+                        contextualizedContent = contextPrefix.trim() + "\n" + child.getText();
+                        System.out.println(">>> Contextualized Chunk successfully generated prefix: " + contextPrefix.trim());
+                    }
+                } catch (Exception e) {
+                    System.err.println("Contextualization generation failed, using raw content: " + e.getMessage());
+                }
+
                 org.springframework.ai.document.Document vectorChunk = new org.springframework.ai.document.Document(
                         childId,
-                        child.getText(),
+                        contextualizedContent,
                         new HashMap<>(child.getMetadata())
                 );
 
@@ -96,7 +124,7 @@ public class DocumentIngestionService {
                 DocumentChunk dbChunk = DocumentChunk.builder()
                         .document(savedDocument)
                         .chunkIndex(childIndex++)
-                        .content(child.getText())
+                        .content(contextualizedContent)
                         .parentContent(parentText) // Store the larger context
                         .embeddingId(childId)
                         .build();

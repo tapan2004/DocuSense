@@ -2,6 +2,8 @@ package com.docusense.backend.service;
 
 import com.docusense.backend.dto.SearchResponse;
 import com.docusense.backend.dto.SourceDto;
+import com.docusense.backend.dto.ChatQueryRequest;
+import com.docusense.backend.dto.ChatMessageDto;
 import com.docusense.backend.model.DocumentChunk;
 import com.docusense.backend.model.SemanticCache;
 import com.docusense.backend.model.QueryLog;
@@ -38,44 +40,98 @@ public class SearchService {
     private final SemanticCacheRepository semanticCacheRepository;
     private final QueryLogRepository queryLogRepository;
     private final PiiRedactorService piiRedactorService;
+    private final ContextPruningService contextPruningService;
     private final EmbeddingModel embeddingModel;
 
     public SearchResponse secureSearch(String query) {
+        // Wrapper delegating to conversational secureChat with an empty history
+        ChatQueryRequest request = ChatQueryRequest.builder()
+                .query(query)
+                .history(new ArrayList<>())
+                .build();
+        return secureChat(request);
+    }
+
+    public SearchResponse secureChat(ChatQueryRequest request) {
         long startTime = System.currentTimeMillis();
         String username = SecurityContextHolder.getContext().getAuthentication().getName();
         String userDepartment = securityFilterService.getUserDepartment();
         String userRole = securityFilterService.getUserRole();
 
-        // 1. PII Redaction
-        String redactedQuery = piiRedactorService.redact(query);
+        // 1. PII Redaction on follow-up query
+        String redactedQuery = piiRedactorService.redact(request.getQuery());
 
-        // 2. HyDE Query Expansion
-        String hypotheticalAnswer = redactedQuery;
+        // Redact history if present
+        List<ChatMessageDto> redactedHistory = new ArrayList<>();
+        if (request.getHistory() != null) {
+            for (ChatMessageDto msg : request.getHistory()) {
+                redactedHistory.add(ChatMessageDto.builder()
+                        .role(msg.getRole())
+                        .content(piiRedactorService.redact(msg.getContent()))
+                        .build());
+            }
+        }
+
+        // 2. History-Aware Query Rewriting
+        String rewrittenQuery = redactedQuery;
+        if (!redactedHistory.isEmpty()) {
+            try {
+                StringBuilder historyBuilder = new StringBuilder();
+                for (ChatMessageDto msg : redactedHistory) {
+                    historyBuilder.append(msg.getRole().toUpperCase()).append(": ").append(msg.getContent()).append("\n");
+                }
+                
+                String rewritePrompt = String.format("""
+                        Given the following conversation history and a follow-up question, rewrite the follow-up question to be a standalone search query that contains all necessary context from the history. If the follow-up question is already standalone, return it exactly as-is. Do not include any explanation.
+                        
+                        HISTORY:
+                        %s
+                        
+                        FOLLOW-UP:
+                        %s
+                        """, historyBuilder.toString(), redactedQuery);
+                
+                String responseText = chatClient.prompt()
+                        .user(rewritePrompt)
+                        .call()
+                        .content();
+                
+                if (responseText != null && !responseText.isBlank()) {
+                    rewrittenQuery = responseText.trim();
+                    System.out.println(">>> History query rewritten to: " + rewrittenQuery);
+                }
+            } catch (Exception e) {
+                System.err.println("Query rewriting failed: " + e.getMessage());
+            }
+        }
+
+        // 3. HyDE Query Expansion
+        String hypotheticalAnswer = rewrittenQuery;
         try {
             String hydePrompt = String.format(
                     "Write a short hypothetical paragraph answering the following question. Do not include any introductory remarks, headers, or external context. Question: %s",
-                    redactedQuery
+                    rewrittenQuery
             );
             hypotheticalAnswer = chatClient.prompt()
                     .user(hydePrompt)
                     .call()
                     .content();
             if (hypotheticalAnswer == null || hypotheticalAnswer.isBlank()) {
-                hypotheticalAnswer = redactedQuery;
+                hypotheticalAnswer = rewrittenQuery;
             }
         } catch (Exception e) {
             System.err.println("HyDE expansion failed, falling back to query: " + e.getMessage());
         }
 
-        // 3. Generate query embedding vector (using the HyDE expanded query)
+        // 4. Generate query embedding vector (using the HyDE expanded query)
         float[] queryEmbedding = embeddingModel.embed(hypotheticalAnswer);
         String sqlVectorString = vectorToSqlString(queryEmbedding);
 
-        // 4. Perform Semantic Cache Lookup in PostgreSQL (Distance < 0.05 corresponds to >0.95 Cosine Similarity)
+        // 5. Perform Semantic Cache Lookup in PostgreSQL (Distance < 0.05 corresponds to >0.95 Cosine Similarity)
         try {
             Optional<SemanticCache> cachedQuery = semanticCacheRepository.findSimilarQuery(userDepartment, userRole, sqlVectorString);
             if (cachedQuery.isPresent()) {
-                System.out.println(">>> Semantic Cache HIT for query: " + query);
+                System.out.println(">>> Semantic Cache HIT for query: " + request.getQuery());
                 long latency = System.currentTimeMillis() - startTime;
                 logQuery(username, redactedQuery, 0, 0, 0.0, latency, "HIT");
                 return SearchResponse.builder()
@@ -87,7 +143,7 @@ public class SearchService {
             System.err.println("Semantic Cache lookup failed: " + e.getMessage());
         }
 
-        // 5. Retrieve security roles list
+        // 6. Retrieve security roles list
         List<String> allowedRoles = new ArrayList<>();
         allowedRoles.add("ROLE_USER");
         if ("ROLE_MANAGER".equals(userRole)) {
@@ -97,7 +153,7 @@ public class SearchService {
             allowedRoles.add("ROLE_ADMIN");
         }
 
-        // 6. Execute Hybrid Search
+        // 7. Execute Hybrid Search
         // A. Semantic Search (pgvector)
         Filter.Expression securityFilter = securityFilterService.getSecureFilterExpression();
         SearchRequest searchRequest = SearchRequest.builder()
@@ -109,9 +165,9 @@ public class SearchService {
         List<Document> vectorDocs = vectorStore.similaritySearch(searchRequest);
 
         // B. Lexical Search (SQL keyword match)
-        List<DocumentChunk> lexicalMatches = documentChunkRepository.findLexicalMatch(redactedQuery, userDepartment, allowedRoles);
+        List<DocumentChunk> lexicalMatches = documentChunkRepository.findLexicalMatch(rewrittenQuery, userDepartment, allowedRoles);
 
-        // 7. Merge & Deduplicate Results
+        // 8. Merge & Deduplicate Results
         Map<String, String> resolvedParentContext = new HashMap<>();
         Map<String, String> snippetToParentMap = new HashMap<>();
         List<SourceDto> candidates = new ArrayList<>();
@@ -161,13 +217,13 @@ public class SearchService {
                     .build();
         }
 
-        // 8. LLM Re-ranking Layer
+        // 9. LLM Re-ranking Layer
         List<SourceDto> reRankedSources = new ArrayList<>();
         if (candidates.size() > 4) {
             try {
                 StringBuilder rankPrompt = new StringBuilder();
                 rankPrompt.append("You are a search ranking assistant. Rank the following context snippets based on their relevance to answering the user query.\n\n");
-                rankPrompt.append("QUERY: ").append(redactedQuery).append("\n\n");
+                rankPrompt.append("QUERY: ").append(rewrittenQuery).append("\n\n");
                 rankPrompt.append("SNIPPETS:\n");
                 for (int i = 0; i < candidates.size(); i++) {
                     rankPrompt.append("INDEX: ").append(i).append("\n");
@@ -207,19 +263,25 @@ public class SearchService {
                     .collect(Collectors.toList());
         }
 
-        // 9. Aggregate Parent Context segments
+        // 10. Aggregate and Prune Context segments (Programmatic Context Pruning)
         List<String> contextParts = new ArrayList<>();
         for (SourceDto src : reRankedSources) {
             String parent = snippetToParentMap.get(src.getTextSnippet());
-            if (parent != null) {
-                contextParts.add(parent);
-            } else {
-                contextParts.add(src.getTextSnippet());
-            }
+            String textToPrune = parent != null ? parent : src.getTextSnippet();
+            String prunedText = contextPruningService.prune(textToPrune, rewrittenQuery);
+            contextParts.add(prunedText);
         }
         String aggregatedContext = String.join("\n\n---\n\n", contextParts);
 
-        // 10. Query Gemini for Response (Using standard ChatResponse for Token Tracking)
+        // 11. Build Prompt containing aggregated context & history
+        StringBuilder historyContext = new StringBuilder();
+        if (!redactedHistory.isEmpty()) {
+            historyContext.append("\nCONVERSATION HISTORY:\n");
+            for (ChatMessageDto msg : redactedHistory) {
+                historyContext.append(msg.getRole().toUpperCase()).append(": ").append(msg.getContent()).append("\n");
+            }
+        }
+
         String combinedPrompt = String.format("""
                 You are a secure corporate AI assistant. You answer questions using only the provided document snippets under CONTEXT.
                 
@@ -230,29 +292,30 @@ public class SearchService {
                 
                 CONTEXT:
                 %s
+                %s
                 
                 QUESTION:
                 %s
-                """, aggregatedContext, redactedQuery);
+                """, aggregatedContext, historyContext.toString(), rewrittenQuery);
 
         ChatResponse chatResponse = chatClient.prompt()
                 .user(combinedPrompt)
                 .call()
                 .chatResponse();
 
-        String generatedAnswer = chatResponse.getResult().getOutput().getContent();
+        String generatedAnswer = chatResponse.getResult().getOutput().getText();
 
         // Extract token usage and cost metrics
         Usage usage = chatResponse.getMetadata().getUsage();
         int inputTokens = (usage != null && usage.getPromptTokens() != null) ? usage.getPromptTokens().intValue() : 0;
-        int outputTokens = (usage != null && usage.getGenerationTokens() != null) ? usage.getGenerationTokens().intValue() : 0;
+        int outputTokens = (usage != null && usage.getCompletionTokens() != null) ? usage.getCompletionTokens().intValue() : 0;
         double cost = (inputTokens * 0.075 / 1_000_000.0) + (outputTokens * 0.30 / 1_000_000.0);
         long latency = System.currentTimeMillis() - startTime;
 
         // Save log details to DB
         logQuery(username, redactedQuery, inputTokens, outputTokens, cost, latency, "MISS");
 
-        // 11. Groundedness Evaluation Guardrail
+        // 12. Groundedness Evaluation Guardrail
         if (generatedAnswer != null && !generatedAnswer.contains("I do not have access")) {
             String validationPrompt = String.format("""
                 You are an AI safety evaluator. 
@@ -284,7 +347,7 @@ public class SearchService {
             }
         }
 
-        // 12. Write Response to Semantic Cache Table
+        // 13. Write Response to Semantic Cache Table
         if (generatedAnswer != null) {
             try {
                 SemanticCache newCache = SemanticCache.builder()
