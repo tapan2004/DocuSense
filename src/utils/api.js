@@ -87,14 +87,19 @@ export const api = {
     });
   },
 
-  getObservabilityLogs: async () => {
-    return apiCall('/api/observability/logs', {
+  getObservabilityLogs: async (page = 0, size = 10, username = '') => {
+    const params = new URLSearchParams({ page, size });
+    if (username) {
+      params.append('username', username);
+    }
+    return apiCall(`/api/observability/logs?${params.toString()}`, {
       method: 'GET'
     });
   },
 
-  getObservabilityFeedbacks: async () => {
-    return apiCall('/api/observability/feedbacks', {
+  getObservabilityFeedbacks: async (page = 0, size = 10) => {
+    const params = new URLSearchParams({ page, size });
+    return apiCall(`/api/observability/feedbacks?${params.toString()}`, {
       method: 'GET'
     });
   }

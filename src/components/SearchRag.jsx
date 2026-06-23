@@ -38,7 +38,7 @@ export default function SearchRag() {
     scrollToBottom();
   }, [messages.length, loading]);
 
-  const typeWriter = (text, messageId, finalSources) => {
+  const typeWriter = (text, messageId, finalSources, isGrounded) => {
     if (typingIntervalRef.current) {
       clearInterval(typingIntervalRef.current);
     }
@@ -49,7 +49,7 @@ export default function SearchRag() {
     setMessages((prev) =>
       prev.map((msg) =>
         msg.id === messageId
-          ? { ...msg, content: text.charAt(0) }
+          ? { ...msg, content: text.charAt(0), grounded: isGrounded }
           : msg
       )
     );
@@ -62,7 +62,7 @@ export default function SearchRag() {
         setMessages((prev) =>
           prev.map((msg) =>
             msg.id === messageId
-              ? { ...msg, content: text, sources: finalSources }
+              ? { ...msg, content: text, sources: finalSources, grounded: isGrounded }
               : msg
           )
         );
@@ -127,17 +127,17 @@ export default function SearchRag() {
     try {
       const data = await api.chat(currentQuery, historyPayload);
 
-      // Clear loading state on assistant message
+      // Clear loading state on assistant message and set grounded
       setMessages((prev) =>
         prev.map((msg) =>
           msg.id === assistantMsgId
-            ? { ...msg, loading: false }
+            ? { ...msg, loading: false, grounded: data.grounded }
             : msg
         )
       );
 
       // Trigger the typewriter effect
-      typeWriter(data.answer || '', assistantMsgId, data.sources || []);
+      typeWriter(data.answer || '', assistantMsgId, data.sources || [], data.grounded);
     } catch (err) {
       setError(err.message);
       // Remove the incomplete assistant bubble on error
@@ -266,6 +266,17 @@ export default function SearchRag() {
                 ) : (
                   <>
                     <p className="whitespace-pre-wrap font-light leading-relaxed">{msg.content}</p>
+                    
+                    {msg.grounded === false && (
+                      <div className="mt-3 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 text-[11px] flex items-start space-x-2 animate-fade-in shrink-0">
+                        <svg className="w-4 h-4 shrink-0 text-amber-400 mt-0.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                        </svg>
+                        <span>
+                          <strong>Guardrail Alert:</strong> This response was flagged by the safety evaluator as potentially containing ungrounded claims or hallucinations.
+                        </span>
+                      </div>
+                    )}
                     
                     {/* Helpful Rating Action */}
                     {msg.id !== 'welcome' && (
