@@ -99,7 +99,6 @@ DocuSenseApi/
 │   │   │   └── service/         # Ingestion, Search, Caching & Vector Building Services
 │   │   └── resources/
 │   │       ├── application.properties
-│   │       └── schema.sql
 └── pom.xml
 ```
 
