@@ -72,7 +72,7 @@
             <scope>runtime</scope>
         </dependency>
 
-        <!-- Lombok for boilerplates -->
+        <!-- Lombok for boilerplate -->
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>

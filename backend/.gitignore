@@ -33,4 +33,4 @@ build/
 .vscode/
 
 # Ignore local environment credentials
-.env
+application-env.properties
